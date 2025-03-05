@@ -1,85 +1,115 @@
-import tensorflow as tf
-from tensorflow.keras import layers, models, regularizers
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import cv2
+import numpy as np
+from tensorflow.keras.models import load_model
+import mediapipe as mp
+import os
 
-# Configuración
-DIR_DATASET = "dataset_manos"  # Carpeta con las imágenes de la mano
-IMG_SIZE = (200, 200)          # Tamaño de las imágenes
-BATCH_SIZE = 32
-EPOCHS = 30
+# Función para redimensionar manteniendo la relación de aspecto
+def resize_with_aspect_ratio(image, target_size):
+    """
+    Redimensiona la imagen manteniendo la relación de aspecto y la rellena con un color de fondo.
+    :param image: Imagen original.
+    :param target_size: Tamaño deseado (ancho, alto).
+    :return: Imagen redimensionada y rellenada.
+    """
+    h, w = image.shape[:2]
+    target_w, target_h = target_size
 
-# Generador de datos con aumento
-train_datagen = ImageDataGenerator(
-    rescale=1.0/255,
-    rotation_range=20,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    validation_split=0.2
-)
+    # Calcular la relación de aspecto
+    aspect_ratio = w / h
+    target_aspect_ratio = target_w / target_h
 
-# Cargar datos
-train_generator = train_datagen.flow_from_directory(
-    DIR_DATASET,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode="categorical",
-    subset="training"
-)
+    # Redimensionar manteniendo la relación de aspecto
+    if aspect_ratio > target_aspect_ratio:
+        # La imagen es más ancha que el objetivo
+        new_w = target_w
+        new_h = int(target_w / aspect_ratio)
+    else:
+        # La imagen es más alta que el objetivo
+        new_h = target_h
+        new_w = int(target_h * aspect_ratio)
 
-val_generator = train_datagen.flow_from_directory(
-    DIR_DATASET,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode="categorical",
-    subset="validation"
-)
+    resized_image = cv2.resize(image, (new_w, new_h))
 
-# agg al modelo CNN regularización L2 y Dropout para evitar el sobreajuste
-model = models.Sequential([
-    # Primer bloque convolucional
-    layers.Conv2D(32, (3, 3), activation='relu',
-                  kernel_regularizer=regularizers.l2(0.001),
-                  input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3)),
-    layers.MaxPooling2D((2, 2)),
-    layers.Dropout(0.25),  # Dropout para reducir el sobreajuste
+    # Crear una imagen de fondo con el tamaño deseado
+    padded_image = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+    # Calcular la posición para centrar la imagen redimensionada
+    x_offset = (target_w - new_w) // 2
+    y_offset = (target_h - new_h) // 2
+
+    # Pegar la imagen redimensionada en el centro de la imagen de fondo
+    padded_image[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_image
+
+    return padded_image
+
+# Cargar modelo
+model = load_model("mi_modelo_señas_manos.h5")
+
+# Etiquetas (deben coincidir con las carpetas del dataset)
+dataset_path = "dataset_manos"
+if not os.path.exists(dataset_path):
+    raise FileNotFoundError(f"No se encontró el dataset en la ruta: {dataset_path}")
+CLASSES = sorted(os.listdir(dataset_path))  # ['A', 'B', 'C', ...]
+
+# Iniciar MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+
+# Configuración de la cámara
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
     
-    # Segundo bloque convolucional
-    layers.Conv2D(64, (3, 3), activation='relu',
-                  kernel_regularizer=regularizers.l2(0.001)),
-    layers.MaxPooling2D((2, 2)),
-    layers.Dropout(0.25),
+    # Convertir a RGB y detectar manos
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb_frame)
     
-    # Tercer bloque convolucional
-    layers.Conv2D(128, (3, 3), activation='relu',
-                  kernel_regularizer=regularizers.l2(0.001)),
-    layers.MaxPooling2D((2, 2)),
-    layers.Dropout(0.25),
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Obtener coordenadas de la mano
+            h, w, _ = frame.shape
+            x_min = min([lm.x for lm in hand_landmarks.landmark]) * w
+            x_max = max([lm.x for lm in hand_landmarks.landmark]) * w
+            y_min = min([lm.y for lm in hand_landmarks.landmark]) * h
+            y_max = max([lm.y for lm in hand_landmarks.landmark]) * h
+            
+            # Expandir el área de la mano un 20%
+            expand = 0.2
+            x_min = max(0, x_min - expand * (x_max - x_min))
+            x_max = min(w, x_max + expand * (x_max - x_min))
+            y_min = max(0, y_min - expand * (y_max - y_min))
+            y_max = min(h, y_max + expand * (y_max - y_min))
+            
+            # Dibujar un cuadrado alrededor de la mano
+            cv2.rectangle(frame, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 255, 0), 2)
+            
+            # Recortar la mano
+            hand_img = frame[int(y_min):int(y_max), int(x_min):int(x_max)]
+            
+            if hand_img.size != 0:  # Verificar que la imagen no esté vacía
+                # Redimensionar manteniendo la relación de aspecto
+                hand_img_resized = resize_with_aspect_ratio(hand_img, (230, 250))  # Cambia el tamaño según tu modelo
+                
+                # Preprocesar la imagen
+                img = np.expand_dims(hand_img_resized, axis=0) / 255.0
+                
+                # Predecir
+                prediction = model.predict(img)
+                class_idx = np.argmax(prediction)
+                class_name = CLASSES[class_idx]
+                confidence = np.max(prediction)
+                
+                # Mostrar resultado
+                cv2.putText(frame, f"{class_name} ({confidence:.2f})", (int(x_min), int(y_min) - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
     
-    # Aplanamiento y capa densa
-    layers.Flatten(),
-    layers.Dense(256, activation='relu',
-                 kernel_regularizer=regularizers.l2(0.001)),
-    layers.Dropout(0.5),  # Dropout mayor en la capa densa
-    
-    # Capa de salida
-    layers.Dense(train_generator.num_classes, activation='softmax')
-])
+    cv2.imshow("Deteccion de señas", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-# Compilación del modelo con una tasa de aprendizaje reducida para mayor estabilidad
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
-
-# Entrenar el modelo
-history = model.fit(
-    train_generator,
-    epochs=EPOCHS,
-    validation_data=val_generator
-)
-
-# Guardar el modelo entrenado
-model.save("mi_modelo_señas_manos.h5")
-print("Modelo guardado!")
+cap.release()
+cv2.destroyAllWindows()

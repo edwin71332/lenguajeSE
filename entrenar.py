@@ -86,6 +86,5 @@ history = model.fit(
     callbacks=[early_stopping, reduce_lr]
 )
 
-# Guardar el modelo entrenado
 model.save("mi_modelo_señas_manos.h5")
 print("Modelo guardado!")

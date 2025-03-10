@@ -1,67 +1,108 @@
-import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import cv2
+import numpy as np
+from tensorflow.keras.models import load_model
+import mediapipe as mp
 
-# Configuración
-DIR_DATASET = "dataset_manos"  # Carpeta con las imágenes de la mano
-IMG_SIZE = (200, 200)          # Tamaño de las imágenes
-BATCH_SIZE = 32
-EPOCHS = 20
+# Función para redimensionar manteniendo la relación de aspecto
+def resize_with_aspect_ratio(image, target_size):
+    h, w = image.shape[:2]
+    target_w, target_h = target_size
+    aspect_ratio = w / h
+    target_aspect_ratio = target_w / target_h
 
-# Generador de datos con aumento
-train_datagen = ImageDataGenerator(
-    rescale=1.0/255,
-    rotation_range=20,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    validation_split=0.2
-)
+    if aspect_ratio > target_aspect_ratio:
+        new_w = target_w
+        new_h = int(target_w / aspect_ratio)
+    else:
+        new_h = target_h
+        new_w = int(target_h * aspect_ratio)
 
-# Cargar datos
-train_generator = train_datagen.flow_from_directory(
-    DIR_DATASET,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode="categorical",
-    subset="training"
-)
+    resized_image = cv2.resize(image, (new_w, new_h))
+    padded_image = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    x_offset = (target_w - new_w) // 2
+    y_offset = (target_h - new_h) // 2
+    padded_image[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized_image
 
-val_generator = train_datagen.flow_from_directory(
-    DIR_DATASET,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode="categorical",
-    subset="validation"
-)
+    return padded_image
 
-# Construir modelo CNN
-model = models.Sequential([
-    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3)),
-    layers.MaxPooling2D((2, 2)),
-    layers.Conv2D(64, (3, 3), activation='relu'),
-    layers.MaxPooling2D((2, 2)),
-    layers.Conv2D(128, (3, 3), activation='relu'),
-    layers.MaxPooling2D((2, 2)),
-    layers.Flatten(),
-    layers.Dense(256, activation='relu'),
-    layers.Dropout(0.5),
-    layers.Dense(train_generator.num_classes, activation='softmax')
-])
+# Cargar modelo
+model = load_model("modelo_vocales.h5")
 
-model.compile(optimizer='adam',
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
+# Definir manualmente las clases 
+CLASSES = ['A', 'E', 'I', 'O', 'U']
 
-# Entrenar
-history = model.fit(
-    train_generator,
-    epochs=EPOCHS,
-    validation_data=val_generator
-)
+'''CLASSES = [
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I',   
+    'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T',
+    'U', 'V', 'W', 'X', 'Y', 'Z'
+] '''
+ 
 
-# Guardar modelo
-model.save("mi_modelo_señas_manos.h5")
-print("Modelo guardado!")
+# Iniciar MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+
+# Configuración de la cámara
+cap = cv2.VideoCapture(0)
+
+# Tamaño deseado para la ventana de la cámara
+window_width = 1280
+window_height = 720
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Convertir a RGB y detectar manos
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb_frame)
+    
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Obtener coordenadas de la mano
+            h, w, _ = frame.shape
+            x_min = min([lm.x for lm in hand_landmarks.landmark]) * w
+            x_max = max([lm.x for lm in hand_landmarks.landmark]) * w
+            y_min = min([lm.y for lm in hand_landmarks.landmark]) * h
+            y_max = max([lm.y for lm in hand_landmarks.landmark]) * h
+            
+            # Expandir el área de la mano un 20%
+            expand = 0.2
+            x_min = max(0, x_min - expand * (x_max - x_min))
+            x_max = min(w, x_max + expand * (x_max - x_min))
+            y_min = max(0, y_min - expand * (y_max - y_min))
+            y_max = min(h, y_max + expand * (y_max - y_min))
+            
+            # Dibujar un cuadrado alrededor de la mano
+            cv2.rectangle(frame, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (0, 255, 0), 2)
+            
+            # Recortar la mano
+            hand_img = frame[int(y_min):int(y_max), int(x_min):int(x_max)]
+            
+            if hand_img.size != 0:  # Verificar que la imagen no esté vacía
+                # Redimensionar manteniendo la relación de aspecto
+                hand_img_resized = resize_with_aspect_ratio(hand_img, (200, 200))
+                
+                # Preprocesar la imagen
+                img = np.expand_dims(hand_img_resized, axis=0) / 255.0
+                
+                # Predecir
+                prediction = model.predict(img)
+                class_idx = np.argmax(prediction)
+                class_name = CLASSES[class_idx]
+                confidence = np.max(prediction)
+                
+                # Mostrar resultado
+                cv2.putText(frame, f"{class_name} ({confidence:.2f})", (int(x_min), int(y_min) - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    
+    # Redimensionar el frame para aumentar el tamaño de la ventana
+    frame_resized = cv2.resize(frame, (window_width, window_height))
+    
+    cv2.imshow("Deteccion de señas", frame_resized)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()

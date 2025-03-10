@@ -32,9 +32,9 @@ model = load_model("modelo_vocales.h5")
 CLASSES = ['A', 'E', 'I', 'O', 'U']
 
 '''CLASSES = [
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I',   
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I','K',   
     'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T',
-    'U', 'V', 'W', 'X', 'Y', 'Z'
+    'U', 'V', 'W', 'X', 'Y'
 ] '''
  
 
